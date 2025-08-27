@@ -252,16 +252,16 @@ function ensureFreshModal() {
 
   await Promise.all(tasks);
 
-  // Single summary touch to refresh UI
-  try {
-    await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
-      credentials:"include",
-      headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
-    });
-    addLine("Summary refreshed.");
-  } catch {
-    addLine("Summary refresh failed (non-fatal).");
-  }
+  // // Single summary touch to refresh UI
+  // try {
+  //   await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
+  //     credentials:"include",
+  //     headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
+  //   });
+  //   addLine("Summary refreshed.");
+  // } catch {
+  //   addLine("Summary refresh failed (non-fatal).");
+  // }
 
   addLine(`Done. Modified: ${ok}${fail ? ` | Failed: ${fail}` : ""}. If the grid doesn’t update, switch month and back or reload.`);
 })();
