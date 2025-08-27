@@ -1,12 +1,16 @@
-// ==== HiBob ExactFlow (no popups): POST entries in parallel, then single GET /summary ====
-// Auto-generates all dates for the CURRENT month, with weekday skipping
+// ==== HiBob ExactFlow: Fix ONLY missing entries based on timesheet /summary ====
+// Reads the current timesheet summary, finds working days with 0h logged, and fills those only.
+// - No popups (tiny in-page modal with Close)
+// - All POSTs run in parallel
+// - Single GET /summary at the end to refresh UI
 
 const START_TIME = "08:00";
 const END_TIME   = "20:00";      // adjust if needed
 const TZ_DEFAULT = -180;         // Asia/Jerusalem in minutes
 
-// 👇 Skip these weekdays (strings "Sun".."Sat" or numbers 0..6; 0=Sun, 6=Sat)
-const SKIP_WEEKDAYS = ["Fri", "Sat"]; // initial as requested
+// Optional weekday skip on top of what /summary already encodes via "potentialHours"
+// (strings "Sun".."Sat" or numbers 0..6; 0=Sun, 6=Sat)
+const SKIP_WEEKDAYS = ["Fri", "Sat"];
 
 // --- helpers ---
 const DAY_NAME_TO_NUM = { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 };
@@ -23,25 +27,6 @@ function normalizeSkipSet(list) {
   return set;
 }
 
-function getCurrentMonthDates() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = today.getMonth(); // 0-based
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const dates = [];
-  const skipSet = normalizeSkipSet(SKIP_WEEKDAYS);
-
-  for (let d = 1; d <= daysInMonth; d++) {
-    const iso = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-    const dow = new Date(`${iso}T00:00:00`).getDay(); // 0=Sun..6=Sat
-    if (skipSet.has(dow)) continue;
-    dates.push(iso);
-  }
-  return dates;
-}
-
-const DATES = getCurrentMonthDates();
-
 function toIsoDate(x) {
   if (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x)) return x;
   const d = (x instanceof Date) ? x : new Date(x);
@@ -56,15 +41,15 @@ function ensureModal() {
 
   const style = document.createElement("style");
   style.textContent = `
-  #hibob-exactflow-modal{position:fixed;inset:auto 16px 16px auto;max-width:520px;z-index:2147483647;
+  #hibob-exactflow-modal{position:fixed;inset:auto 16px 16px auto;max-width:560px;z-index:2147483647;
     font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
   #hibob-exactflow-modal .card{background:#fff;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.12);
     padding:16px 16px 12px}
-  #hibob-exactflow-modal .row{display:flex;gap:12px;align-items:center;margin-bottom:10px}
+  #hibob-exactflow-modal .row{display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
   #hibob-exactflow-modal .badge{font-weight:700}
   #hibob-exactflow-modal .ok{color:#0a7}
   #hibob-exactflow-modal .warn{color:#b00}
-  #hibob-exactflow-modal .muted{color:#555;white-space:pre-wrap;max-height:180px;overflow:auto;border-top:1px solid #eee;padding-top:8px}
+  #hibob-exactflow-modal .muted{color:#555;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px solid #eee;padding-top:8px}
   #hibob-exactflow-modal button{margin-top:8px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;background:#fafafa}
   #hibob-exactflow-modal .progress{height:6px;background:#eee;border-radius:999px;overflow:hidden;margin-top:8px}
   #hibob-exactflow-modal .bar{height:100%;width:0%}
@@ -77,12 +62,12 @@ function ensureModal() {
     <div class="card">
       <div class="row">
         <div class="badge">HiBob ExactFlow</div>
-        <div class="muted" style="border:none;padding:0;margin:0;color:#777">Running…</div>
+        <div class="muted" style="border:none;padding:0;margin:0;color:#777">Scanning for missing entries…</div>
       </div>
       <div class="row">
-        <div>Modified: <b class="ok" id="hef-ok">0</b></div>
+        <div>Will modify: <b class="ok" id="hef-ok">0</b></div>
         <div>Failed: <b class="warn" id="hef-fail">0</b></div>
-        <div>Total: <b id="hef-total">0</b></div>
+        <div>Total candidates: <b id="hef-total">0</b></div>
       </div>
       <div class="progress"><div class="bar" id="hef-bar"></div></div>
       <div class="muted" id="hef-log"></div>
@@ -113,25 +98,87 @@ function ensureModal() {
   const elTot  = modal.querySelector("#hef-total");
   const elBar  = modal.querySelector("#hef-bar");
   const elLog  = modal.querySelector("#hef-log");
+  const addLine = (s)=>{ elLog.textContent += (elLog.textContent ? "\n" : "") + s; elLog.scrollTop = elLog.scrollHeight; };
 
   const tzOff = -new Date().getTimezoneOffset() || TZ_DEFAULT;
 
+  // who am I?
   const user = await (await fetch("/api/user",{credentials:"include"})).json().catch(()=>null);
   const empId = user?.id;
-  if (!empId) { elLog.textContent = "Could not read /api/user"; return; }
+  if (!empId) { addLine("Could not read /api/user"); return; }
 
-  let ok = 0, fail = 0, done = 0;
-  elTot.textContent = String(DATES.length);
+  // read current timesheet summary
+  const summaryRes = await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
+    credentials:"include",
+    headers: {
+      "accept":"application/json, text/plain, */*",
+      "x-requested-with":"XMLHttpRequest",
+      "bob-timezoneoffset": String(tzOff)
+    }
+  }).catch(()=>null);
 
-  const skipList = Array.from(normalizeSkipSet(SKIP_WEEKDAYS)).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ");
-  const addLine = (s)=>{ elLog.textContent += (elLog.textContent ? "\n" : "") + s; elLog.scrollTop = elLog.scrollHeight; };
-  addLine(`Skipped weekdays: ${skipList}`);
-  addLine(`Posting ${DATES.length} day(s) ${START_TIME}–${END_TIME}…`);
+  if (!summaryRes || !summaryRes.ok) {
+    addLine("Failed to GET timesheet summary.");
+    return;
+  }
 
-  const postOne = async (rawIso) => {
-    let iso = rawIso;
-    try { iso = toIsoDate(rawIso); } catch (e) { throw new Error("Bad date: "+rawIso); }
+  /** summary example shape:
+   *  { dailyBreakdown: { categories: ["YYYY-MM-DD", ...],
+   *      graphData: [
+   *        {id:"potentialHours", target:[{value:8|9|0|null}, ...]},
+   *        {id:"hoursWorked", data:[{value:number|null}, ...]},
+   *        ...
+   *      ]
+   *    },
+   *    hasMissingEntries: true|false, ...
+   *  }
+   */
+  const summary = await summaryRes.json().catch(()=>null);
+  if (!summary?.dailyBreakdown?.categories?.length) {
+    addLine("Summary is missing daily breakdown.");
+    return;
+  }
 
+  // extract arrays we need
+  const cats = summary.dailyBreakdown.categories; // ISO dates
+  const g = (id)=> summary.dailyBreakdown.graphData?.find(s=>s.id===id);
+  const potential = g("potentialHours")?.target ?? [];
+  const worked    = g("hoursWorked")?.data ?? [];
+
+  const skipSet = normalizeSkipSet(SKIP_WEEKDAYS);
+  const weekday = (iso)=> new Date(`${iso}T00:00:00`).getDay();
+
+  // Build candidate list:
+  // - potentialHours > 0 (i.e., a payable workday)
+  // - hoursWorked is 0 or null/undefined
+  // - not in SKIP_WEEKDAYS (explicit override)
+  // - only past or today (ignore future dates where potential may be null)
+  const todayIso = new Date().toISOString().slice(0,10);
+  const isPastOrToday = (iso)=> iso <= todayIso;
+
+  const candidates = [];
+  for (let i=0;i<cats.length;i++){
+    const iso = cats[i];
+    const pot = potential[i]?.value ?? 0;
+    const wrk = worked[i]?.value ?? 0;
+    if (!iso || !isPastOrToday(iso)) continue;        // ignore future
+    if (skipSet.has(weekday(iso))) continue;          // user override
+    if (!pot || pot <= 0) continue;                   // weekends/holidays
+    if (wrk && wrk > 0) continue;                     // already filled
+    candidates.push(iso);
+  }
+
+  elTot.textContent = String(candidates.length);
+  if (!candidates.length) {
+    addLine("No missing payable days to fix. ✅");
+    return;
+  }
+
+  addLine(`Will fill ${candidates.length} day(s) ${START_TIME}–${END_TIME}.`);
+  addLine(`Skipped weekdays: ${Array.from(skipSet).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ") || "—"}`);
+
+  // POST helper
+  const postOne = async (iso) => {
     const url = `/api/attendance/employees/${empId}/attendance/entries?forDate=${encodeURIComponent(iso)}`;
     const body = [{
       id: null,
@@ -157,24 +204,27 @@ function ensureModal() {
       const txt = await res.text().catch(()=>"(no body)");
       throw new Error(`POST ${iso} → ${res.status} ${res.statusText} ${txt.slice(0,120)}`);
     }
-    return iso;
   };
 
-  // Fire ALL requests in parallel
-  const tasks = DATES.map(d => postOne(d)
-    .then(iso => { ok++; addLine(`✓ ${iso}`); })
-    .catch(err => { fail++; addLine(`✗ ${err.message}`); })
-    .finally(() => {
-      done++;
-      elOk.textContent   = String(ok);
-      elFail.textContent = String(fail);
-      elBar.style.width  = `${Math.round((done / DATES.length) * 100)}%`;
-    })
+  // Fire all in parallel with progress
+  let ok=0, fail=0, done=0;
+  const updateBar = ()=> { 
+    done++; 
+    elOk.textContent = String(ok);
+    elFail.textContent = String(fail);
+    elBar.style.width = `${Math.round((done/candidates.length)*100)}%`;
+  };
+
+  const tasks = candidates.map(iso =>
+    postOne(iso)
+      .then(()=>{ ok++; addLine(`✓ ${iso}`); })
+      .catch(err=>{ fail++; addLine(`✗ ${iso} — ${err.message}`); })
+      .finally(updateBar)
   );
 
   await Promise.all(tasks);
 
-  // Single summary touch to refresh UI (no per-day GETs)
+  // Single summary touch to refresh UI
   try {
     await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
       credentials:"include",
