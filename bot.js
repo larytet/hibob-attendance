@@ -40,9 +40,21 @@ function toIsoDate(x) {
   const empId = user?.id;
   if (!empId) return warn("Could not read /api/user");
 
+  // --- tracking counters ---
+  let modifiedCount = 0;
+  const modifiedDates = [];
+  let failedCount = 0;
+  let skippedCount = 0;
+
   for (const raw of DATES) {
     let iso;
-    try { iso = toIsoDate(raw); } catch (e) { warn("Skip (bad date):", raw, e.message); continue; }
+    try { 
+      iso = toIsoDate(raw); 
+    } catch (e) { 
+      warn("Skip (bad date):", raw, e.message); 
+      skippedCount++;
+      continue; 
+    }
 
     const url = `/api/attendance/employees/${empId}/attendance/entries?forDate=${encodeURIComponent(iso)}`;
     const body = [{
@@ -69,13 +81,56 @@ function toIsoDate(x) {
     log("RESP", res.status, res.statusText, txt.slice(0,300));
 
     if (res.ok) {
+      modifiedCount++;
+      modifiedDates.push(iso);
+
       // UI does this: touch summary to refresh local state
       await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
         credentials:"include",
         headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
       }).catch(()=>{});
       await sleep(2000); // small cooldown so the grid catches up
+    } else {
+      failedCount++;
     }
+  }
+
+  // --- pop window with results ---
+  const msg = [
+    `Modified entries: ${modifiedCount}`,
+    modifiedDates.length ? `Dates: ${modifiedDates.join(", ")}` : null,
+    failedCount ? `Failed: ${failedCount}` : null,
+    skippedCount ? `Skipped (bad date): ${skippedCount}` : null
+  ].filter(Boolean).join("\n");
+
+  // Try a small centered popup; fall back to alert if blocked.
+  const w = 420, h = 240;
+  const y = Math.max(0, (window.screen.height - h) / 2);
+  const x = Math.max(0, (window.screen.width  - w) / 2);
+  const pop = window.open("", "HiBobExactFlowResult", `width=${w},height=${h},left=${x},top=${y},resizable=yes`);
+  if (pop) {
+    pop.document.write(`
+      <html>
+        <head>
+          <title>HiBob: Entries Updated</title>
+          <meta charset="utf-8" />
+          <style>
+            body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+            .count { font-size: 32px; font-weight: 700; margin-bottom: 12px; }
+            .muted { color: #555; white-space: pre-wrap; }
+            .ok { color: #0a7; }
+          </style>
+        </head>
+        <body>
+          <div class="count">Modified entries: <span class="ok">${modifiedCount}</span></div>
+          <div class="muted">${msg.replace(/\n/g,"<br>")}</div>
+          <button onclick="window.close()" style="margin-top:16px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;">Close</button>
+        </body>
+      </html>
+    `);
+    pop.document.close();
+  } else {
+    alert(msg);
   }
 
   log("Done. If grid doesn't update, switch month and back or reload.");
