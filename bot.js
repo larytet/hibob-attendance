@@ -115,6 +115,26 @@ function ensureFreshModal() {
   }
 })();
 
+// ===== Detect visible attendance period =====
+function detectAttendancePeriod() {
+  const header = document.querySelector("app-ee-attendance-top-header")?.innerText
+              || document.body.innerText;
+  const re = /([A-Za-z]{3,9})\s*\/\s*(\d{1,2})\s*\/\s*(\d{4})\s*[-–]\s*([A-Za-z]{3,9})\s*\/\s*(\d{1,2})\s*\/\s*(\d{4})/;
+  const m = header.match(re);
+  if (m) {
+    const MONTHS = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
+    const toIso = (y,m,d) => `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    const m1 = MONTHS[m[1].slice(0,3).toLowerCase()];
+    const m2 = MONTHS[m[4].slice(0,3).toLowerCase()];
+    if (m1!=null && m2!=null) {
+      return { start: toIso(+m[3], m1, +m[2]), end: toIso(+m[6], m2, +m[5]), source:"header" };
+    }
+  }
+  // fallback → today only
+  const todayIso = new Date().toISOString().slice(0,10);
+  return { start: todayIso, end: todayIso, source:"fallback-today" };
+}
+
 // --- main ---
 (async () => {
   const log  = (...a)=>console.log("[HiBob ExactFlow]", ...a);
@@ -128,7 +148,9 @@ function ensureFreshModal() {
   const elLog  = modal.querySelector("#hef-log");
   const addLine = (s)=>{ elLog.textContent += (elLog.textContent ? "\n" : "") + s; elLog.scrollTop = elLog.scrollHeight; };
 
-  const tzOff = -new Date().getTimezoneOffset() || TZ_DEFAULT;
+  // Keep real 0 (UTC). Fallback only if the value isn't finite.
+  const _tz = -new Date().getTimezoneOffset();
+  const tzOff = Number.isFinite(_tz) ? _tz : TZ_DEFAULT;
 
   // who am I?
   const user = await (await fetch("/api/user",{credentials:"include"})).json().catch(()=>null);
@@ -167,12 +189,17 @@ function ensureFreshModal() {
     return;
   }
 
+  // Determine visible period from header, fallback to today
+  const { start: periodStart, end: periodEnd, source: periodSource } = detectAttendancePeriod();
+  const headerBadge = modal.querySelector(".row .muted");
+  if (headerBadge) headerBadge.textContent = `Running… Period: ${periodStart} → ${periodEnd} (${periodSource})`;
+  addLine(`Using period ${periodStart} → ${periodEnd} (source: ${periodSource}).`);
+
   // extract arrays we need
   const cats = summary.dailyBreakdown.categories; // ISO dates
   const g = (id)=> summary.dailyBreakdown.graphData?.find(s=>s.id===id);
   const potential = g("potentialHours")?.target ?? [];
   const worked    = g("hoursWorked")?.data ?? [];
-
   const skipSet = normalizeSkipSet(SKIP_WEEKDAYS);
   const weekday = (iso)=> new Date(`${iso}T00:00:00`).getDay();
 
@@ -190,6 +217,8 @@ function ensureFreshModal() {
     const pot = potential[i]?.value ?? 0;
     const wrk = worked[i]?.value ?? 0;
     if (!iso || !isPastOrToday(iso)) continue;        // ignore future
+    // Restrict to the page’s visible period (or today, if header not parsed)
+    if (iso < periodStart || iso > periodEnd) continue;
     if (skipSet.has(weekday(iso))) continue;          // user override
     if (!pot || pot <= 0) continue;                   // weekends/holidays
     if (wrk && wrk > 0) continue;                     // already filled
@@ -202,7 +231,7 @@ function ensureFreshModal() {
     return;
   }
 
-  addLine(`Will fill ${candidates.length} day(s) ${START_TIME}–${END_TIME}.`);
+  addLine(`Will fill ${candidates.length} day(s) ${START_TIME}–${END_TIME} within ${periodStart} → ${periodEnd}.`);
   addLine(`Skipped weekdays: ${Array.from(skipSet).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ") || "—"}`);
 
   // POST helper
