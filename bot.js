@@ -34,40 +34,54 @@ function toIsoDate(x) {
   throw new Error("Unparseable date: " + x);
 }
 
-// --- tiny in-page modal (no popups) ---
-function ensureModal() {
-  let modal = document.getElementById("hibob-exactflow-modal");
-  if (modal) return modal;
+// ===== Modal lifecycle utils (drop-in replacement) =====
 
+// IDs for modal + style so we can cleanly remove them
+const HIBOB_MODAL_ID = "hibob-exactflow-modal";
+const HIBOB_STYLE_ID = "hibob-exactflow-style";
+
+// Remove any previous modal + style (even if hidden)
+function destroyModal() {
+  const oldModal = document.getElementById(HIBOB_MODAL_ID);
+  if (oldModal && oldModal.parentNode) oldModal.parentNode.removeChild(oldModal);
+  const oldStyle = document.getElementById(HIBOB_STYLE_ID);
+  if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);
+}
+
+// Create a fresh modal and return the element
+function createModal() {
+  // style
   const style = document.createElement("style");
+  style.id = HIBOB_STYLE_ID;
   style.textContent = `
-  #hibob-exactflow-modal{position:fixed;inset:auto 16px 16px auto;max-width:560px;z-index:2147483647;
+  #${HIBOB_MODAL_ID}{position:fixed;inset:auto 16px 16px auto;max-width:560px;z-index:2147483647;
     font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
-  #hibob-exactflow-modal .card{background:#fff;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.12);
+  #${HIBOB_MODAL_ID} .card{background:#fff;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.12);
     padding:16px 16px 12px}
-  #hibob-exactflow-modal .row{display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-  #hibob-exactflow-modal .badge{font-weight:700}
-  #hibob-exactflow-modal .ok{color:#0a7}
-  #hibob-exactflow-modal .warn{color:#b00}
-  #hibob-exactflow-modal .muted{color:#555;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px solid #eee;padding-top:8px}
-  #hibob-exactflow-modal button{margin-top:8px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;background:#fafafa}
-  #hibob-exactflow-modal .progress{height:6px;background:#eee;border-radius:999px;overflow:hidden;margin-top:8px}
-  #hibob-exactflow-modal .bar{height:100%;width:0%}
+  #${HIBOB_MODAL_ID} .row{display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  #${HIBOB_MODAL_ID} .badge{font-weight:700}
+  #${HIBOB_MODAL_ID} .ok{color:#0a7}
+  #${HIBOB_MODAL_ID} .warn{color:#b00}
+  #${HIBOB_MODAL_ID} .muted{color:#555;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px solid #eee;padding-top:8px}
+  #${HIBOB_MODAL_ID} button{margin-top:8px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;background:#fafafa}
+  #${HIBOB_MODAL_ID} .progress{height:6px;background:#eee;border-radius:999px;overflow:hidden;margin-top:8px}
+  #${HIBOB_MODAL_ID} .bar{height:100%;width:0%}
   `;
   document.head.appendChild(style);
 
-  modal = document.createElement("div");
-  modal.id = "hibob-exactflow-modal";
+  // modal
+  const modal = document.createElement("div");
+  modal.id = HIBOB_MODAL_ID;
   modal.innerHTML = `
     <div class="card">
       <div class="row">
         <div class="badge">HiBob ExactFlow</div>
-        <div class="muted" style="border:none;padding:0;margin:0;color:#777">Scanning for missing entries…</div>
+        <div class="muted" style="border:none;padding:0;margin:0;color:#777">Running…</div>
       </div>
       <div class="row">
-        <div>Will modify: <b class="ok" id="hef-ok">0</b></div>
+        <div>Modified: <b class="ok" id="hef-ok">0</b></div>
         <div>Failed: <b class="warn" id="hef-fail">0</b></div>
-        <div>Total candidates: <b id="hef-total">0</b></div>
+        <div>Total: <b id="hef-total">0</b></div>
       </div>
       <div class="progress"><div class="bar" id="hef-bar"></div></div>
       <div class="muted" id="hef-log"></div>
@@ -75,15 +89,29 @@ function ensureModal() {
     </div>
   `;
   document.body.appendChild(modal);
-  modal.querySelector("#hef-close").addEventListener("click", () => { modal.style.display = "none"; });
+
+  // Close only hides; next run will recreate fresh
+  modal.querySelector("#hef-close").addEventListener("click", () => {
+    modal.style.display = "none";
+  });
+
   return modal;
 }
 
-(function attachOnce(){
+// Always start with a brand-new modal.
+// If an old one exists (even hidden), it will be destroyed first.
+function ensureFreshModal() {
+  destroyModal();
+  return createModal();
+}
+
+// Call this at the top of your main IIFE before you query elements:
+(function attachFreshOnce() {
+  const boot = () => ensureFreshModal();
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensureModal, { once:true });
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
-    ensureModal();
+    boot();
   }
 })();
 
@@ -92,7 +120,7 @@ function ensureModal() {
   const log  = (...a)=>console.log("[HiBob ExactFlow]", ...a);
   const warn = (...a)=>console.warn("[HiBob ExactFlow]", ...a);
 
-  const modal = ensureModal();
+  const modal = ensureFreshModal();
   const elOk   = modal.querySelector("#hef-ok");
   const elFail = modal.querySelector("#hef-fail");
   const elTot  = modal.querySelector("#hef-total");
