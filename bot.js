@@ -1,4 +1,4 @@
-// ==== HiBob ExactFlow: POST entries like the UI, then GET /summary ====
+// ==== HiBob ExactFlow (no popups): POST entries in parallel, then single GET /summary ====
 // Auto-generates all dates for the CURRENT month, with weekday skipping
 
 const START_TIME = "08:00";
@@ -49,23 +49,88 @@ function toIsoDate(x) {
   throw new Error("Unparseable date: " + x);
 }
 
+// --- tiny in-page modal (no popups) ---
+function ensureModal() {
+  let modal = document.getElementById("hibob-exactflow-modal");
+  if (modal) return modal;
+
+  const style = document.createElement("style");
+  style.textContent = `
+  #hibob-exactflow-modal{position:fixed;inset:auto 16px 16px auto;max-width:520px;z-index:2147483647;
+    font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  #hibob-exactflow-modal .card{background:#fff;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.12);
+    padding:16px 16px 12px}
+  #hibob-exactflow-modal .row{display:flex;gap:12px;align-items:center;margin-bottom:10px}
+  #hibob-exactflow-modal .badge{font-weight:700}
+  #hibob-exactflow-modal .ok{color:#0a7}
+  #hibob-exactflow-modal .warn{color:#b00}
+  #hibob-exactflow-modal .muted{color:#555;white-space:pre-wrap;max-height:180px;overflow:auto;border-top:1px solid #eee;padding-top:8px}
+  #hibob-exactflow-modal button{margin-top:8px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;background:#fafafa}
+  #hibob-exactflow-modal .progress{height:6px;background:#eee;border-radius:999px;overflow:hidden;margin-top:8px}
+  #hibob-exactflow-modal .bar{height:100%;width:0%}
+  `;
+  document.head.appendChild(style);
+
+  modal = document.createElement("div");
+  modal.id = "hibob-exactflow-modal";
+  modal.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <div class="badge">HiBob ExactFlow</div>
+        <div class="muted" style="border:none;padding:0;margin:0;color:#777">Running…</div>
+      </div>
+      <div class="row">
+        <div>Modified: <b class="ok" id="hef-ok">0</b></div>
+        <div>Failed: <b class="warn" id="hef-fail">0</b></div>
+        <div>Total: <b id="hef-total">0</b></div>
+      </div>
+      <div class="progress"><div class="bar" id="hef-bar"></div></div>
+      <div class="muted" id="hef-log"></div>
+      <button id="hef-close">Close</button>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector("#hef-close").addEventListener("click", () => { modal.style.display = "none"; });
+  return modal;
+}
+
+(function attachOnce(){
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ensureModal, { once:true });
+  } else {
+    ensureModal();
+  }
+})();
+
+// --- main ---
 (async () => {
   const log  = (...a)=>console.log("[HiBob ExactFlow]", ...a);
   const warn = (...a)=>console.warn("[HiBob ExactFlow]", ...a);
-  const sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+  const modal = ensureModal();
+  const elOk   = modal.querySelector("#hef-ok");
+  const elFail = modal.querySelector("#hef-fail");
+  const elTot  = modal.querySelector("#hef-total");
+  const elBar  = modal.querySelector("#hef-bar");
+  const elLog  = modal.querySelector("#hef-log");
+
   const tzOff = -new Date().getTimezoneOffset() || TZ_DEFAULT;
 
   const user = await (await fetch("/api/user",{credentials:"include"})).json().catch(()=>null);
   const empId = user?.id;
-  if (!empId) return warn("Could not read /api/user");
+  if (!empId) { elLog.textContent = "Could not read /api/user"; return; }
 
-  let modifiedCount = 0;
-  const modifiedDates = [];
-  let failedCount = 0;
+  let ok = 0, fail = 0, done = 0;
+  elTot.textContent = String(DATES.length);
 
-  for (const raw of DATES) {
-    let iso;
-    try { iso = toIsoDate(raw); } catch (e) { warn("Skip (bad date):", raw, e.message); continue; }
+  const skipList = Array.from(normalizeSkipSet(SKIP_WEEKDAYS)).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ");
+  const addLine = (s)=>{ elLog.textContent += (elLog.textContent ? "\n" : "") + s; elLog.scrollTop = elLog.scrollHeight; };
+  addLine(`Skipped weekdays: ${skipList}`);
+  addLine(`Posting ${DATES.length} day(s) ${START_TIME}–${END_TIME}…`);
+
+  const postOne = async (rawIso) => {
+    let iso = rawIso;
+    try { iso = toIsoDate(rawIso); } catch (e) { throw new Error("Bad date: "+rawIso); }
 
     const url = `/api/attendance/employees/${empId}/attendance/entries?forDate=${encodeURIComponent(iso)}`;
     const body = [{
@@ -76,7 +141,6 @@ function toIsoDate(x) {
       offset: tzOff
     }];
 
-    log("POST", url, body);
     const res = await fetch(url, {
       method: "POST",
       credentials: "include",
@@ -88,59 +152,38 @@ function toIsoDate(x) {
       },
       body: JSON.stringify(body)
     });
-    const txt = await res.text().catch(()=>"(no body)");
-    log("RESP", res.status, res.statusText, txt.slice(0,300));
 
-    if (res.ok) {
-      modifiedCount++;
-      modifiedDates.push(iso);
-      // Touch summary to refresh UI
-      await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
-        credentials:"include",
-        headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
-      }).catch(()=>{});
-      await sleep(1000);
-    } else {
-      failedCount++;
+    if (!res.ok) {
+      const txt = await res.text().catch(()=>"(no body)");
+      throw new Error(`POST ${iso} → ${res.status} ${res.statusText} ${txt.slice(0,120)}`);
     }
+    return iso;
+  };
+
+  // Fire ALL requests in parallel
+  const tasks = DATES.map(d => postOne(d)
+    .then(iso => { ok++; addLine(`✓ ${iso}`); })
+    .catch(err => { fail++; addLine(`✗ ${err.message}`); })
+    .finally(() => {
+      done++;
+      elOk.textContent   = String(ok);
+      elFail.textContent = String(fail);
+      elBar.style.width  = `${Math.round((done / DATES.length) * 100)}%`;
+    })
+  );
+
+  await Promise.all(tasks);
+
+  // Single summary touch to refresh UI (no per-day GETs)
+  try {
+    await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
+      credentials:"include",
+      headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
+    });
+    addLine("Summary refreshed.");
+  } catch {
+    addLine("Summary refresh failed (non-fatal).");
   }
 
-  const msg = [
-    `Modified entries: ${modifiedCount}`,
-    modifiedDates.length ? `Dates: ${modifiedDates.join(", ")}` : null,
-    failedCount ? `Failed: ${failedCount}` : null,
-    `Skipped weekdays: ${Array.from(normalizeSkipSet(SKIP_WEEKDAYS)).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ")}`
-  ].filter(Boolean).join("\n");
-
-  // Pop-up summary (fallback to alert if blocked)
-  const w = 460, h = 280;
-  const y = Math.max(0, (window.screen.height - h) / 2);
-  const x = Math.max(0, (window.screen.width  - w) / 2);
-  const pop = window.open("", "HiBobExactFlowResult", `width=${w},height=${h},left=${x},top=${y},resizable=yes`);
-  if (pop) {
-    pop.document.write(`
-      <html>
-        <head>
-          <title>HiBob: Entries Updated</title>
-          <meta charset="utf-8" />
-          <style>
-            body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
-            .count { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
-            .muted { color: #555; white-space: pre-wrap; }
-            .ok { color: #0a7; }
-          </style>
-        </head>
-        <body>
-          <div class="count">Modified entries: <span class="ok">${modifiedCount}</span></div>
-          <div class="muted">${msg.replace(/\n/g,"<br>")}</div>
-          <button onclick="window.close()" style="margin-top:16px;padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer;">Close</button>
-        </body>
-      </html>
-    `);
-    pop.document.close();
-  } else {
-    alert(msg);
-  }
-
-  log("Done. If grid doesn't update, switch month and back or reload.");
+  addLine(`Done. Modified: ${ok}${fail ? ` | Failed: ${fail}` : ""}. If the grid doesn’t update, switch month and back or reload.`);
 })();
