@@ -1,30 +1,49 @@
 // ==== HiBob ExactFlow: POST entries like the UI, then GET /summary ====
-// Give it any date strings; it will normalize to ISO and post.
-
-const DATES = [
-  "2025-08-04",         // already ISO
-  "Wed, Aug/06/2025",   // display-ish
-  "Aug 07, 2025"        // common English format
-];
+// Auto-generates all dates for the CURRENT month, with weekday skipping
 
 const START_TIME = "08:00";
-const END_TIME   = "20:00";     // your capture used 20:00; change if needed
-const TZ_DEFAULT = -180;        // Asia/Jerusalem in minutes
+const END_TIME   = "20:00";      // adjust if needed
+const TZ_DEFAULT = -180;         // Asia/Jerusalem in minutes
+
+// 👇 Skip these weekdays (strings "Sun".."Sat" or numbers 0..6; 0=Sun, 6=Sat)
+const SKIP_WEEKDAYS = ["Fri", "Sat"]; // initial as requested
+
+// --- helpers ---
+const DAY_NAME_TO_NUM = { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 };
+function normalizeSkipSet(list) {
+  const set = new Set();
+  for (const v of list) {
+    if (typeof v === "number" && v >= 0 && v <= 6) { set.add(v); continue; }
+    if (typeof v === "string") {
+      const key = v.slice(0,3).trim().replace(/^[a-z]/, c => c.toUpperCase()).replace(/[A-Z]{2,}.*/, m => m.slice(0,3));
+      if (key in DAY_NAME_TO_NUM) { set.add(DAY_NAME_TO_NUM[key]); continue; }
+    }
+    console.warn("[HiBob ExactFlow] Ignoring invalid SKIP_WEEKDAYS entry:", v);
+  }
+  return set;
+}
+
+function getCurrentMonthDates() {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = today.getMonth(); // 0-based
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const dates = [];
+  const skipSet = normalizeSkipSet(SKIP_WEEKDAYS);
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    const dow = new Date(`${iso}T00:00:00`).getDay(); // 0=Sun..6=Sat
+    if (skipSet.has(dow)) continue;
+    dates.push(iso);
+  }
+  return dates;
+}
+
+const DATES = getCurrentMonthDates();
 
 function toIsoDate(x) {
   if (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x)) return x;
-
-  let m = (typeof x === "string") && x.match(/^\w{3},\s*([A-Za-z]{3})\/(\d{2})\/(\d{4})$/);
-  if (m) {
-    const mon = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12}[m[1]];
-    return `${m[3]}-${String(mon).padStart(2,"0")}-${m[2]}`;
-  }
-  m = (typeof x === "string") && x.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$/);
-  if (m) {
-    const mon = {January:1,February:2,March:3,April:4,May:5,June:6,July:7,August:8,September:9,October:10,November:11,December:12,
-                 Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12}[m[1]];
-    return `${m[3]}-${String(mon).padStart(2,"0")}-${String(m[2]).padStart(2,"0")}`;
-  }
   const d = (x instanceof Date) ? x : new Date(x);
   if (!isNaN(d)) return d.toISOString().slice(0,10);
   throw new Error("Unparseable date: " + x);
@@ -40,21 +59,13 @@ function toIsoDate(x) {
   const empId = user?.id;
   if (!empId) return warn("Could not read /api/user");
 
-  // --- tracking counters ---
   let modifiedCount = 0;
   const modifiedDates = [];
   let failedCount = 0;
-  let skippedCount = 0;
 
   for (const raw of DATES) {
     let iso;
-    try { 
-      iso = toIsoDate(raw); 
-    } catch (e) { 
-      warn("Skip (bad date):", raw, e.message); 
-      skippedCount++;
-      continue; 
-    }
+    try { iso = toIsoDate(raw); } catch (e) { warn("Skip (bad date):", raw, e.message); continue; }
 
     const url = `/api/attendance/employees/${empId}/attendance/entries?forDate=${encodeURIComponent(iso)}`;
     const body = [{
@@ -83,28 +94,26 @@ function toIsoDate(x) {
     if (res.ok) {
       modifiedCount++;
       modifiedDates.push(iso);
-
-      // UI does this: touch summary to refresh local state
+      // Touch summary to refresh UI
       await fetch(`/api/attendance/employees/${empId}/timesheets/0/summary`, {
         credentials:"include",
         headers: { "accept":"application/json, text/plain, */*", "x-requested-with":"XMLHttpRequest", "bob-timezoneoffset": String(tzOff) }
       }).catch(()=>{});
-      await sleep(2000); // small cooldown so the grid catches up
+      await sleep(1000);
     } else {
       failedCount++;
     }
   }
 
-  // --- pop window with results ---
   const msg = [
     `Modified entries: ${modifiedCount}`,
     modifiedDates.length ? `Dates: ${modifiedDates.join(", ")}` : null,
     failedCount ? `Failed: ${failedCount}` : null,
-    skippedCount ? `Skipped (bad date): ${skippedCount}` : null
+    `Skipped weekdays: ${Array.from(normalizeSkipSet(SKIP_WEEKDAYS)).sort().map(n => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][n]).join(", ")}`
   ].filter(Boolean).join("\n");
 
-  // Try a small centered popup; fall back to alert if blocked.
-  const w = 420, h = 240;
+  // Pop-up summary (fallback to alert if blocked)
+  const w = 460, h = 280;
   const y = Math.max(0, (window.screen.height - h) / 2);
   const x = Math.max(0, (window.screen.width  - w) / 2);
   const pop = window.open("", "HiBobExactFlowResult", `width=${w},height=${h},left=${x},top=${y},resizable=yes`);
@@ -116,7 +125,7 @@ function toIsoDate(x) {
           <meta charset="utf-8" />
           <style>
             body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
-            .count { font-size: 32px; font-weight: 700; margin-bottom: 12px; }
+            .count { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
             .muted { color: #555; white-space: pre-wrap; }
             .ok { color: #0a7; }
           </style>

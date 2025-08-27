@@ -27,7 +27,6 @@ At the end of the run, it shows a **pop-up window** with the total number of mod
 
 ## 📝 Configuration
 
-- **DATES** – list of dates to process. Supports ISO, English, and display-ish formats.
 - **START_TIME** / **END_TIME** – working hours for the created entry.
 - **TZ_DEFAULT** – timezone offset (default set for Asia/Jerusalem `-180` minutes).
 - The script auto-detects your local timezone offset unless overridden.
@@ -36,12 +35,8 @@ At the end of the run, it shows a **pop-up window** with the total number of mod
 
 ## 🔧 Usage
 1. Copy the script into the browser console while logged into HiBob.
-2. Adjust:
-   - The `DATES` array.
-   - `START_TIME` / `END_TIME` if needed.
-   - `TZ_DEFAULT` if you are in a different timezone.
-3. Run it.
-4. A pop-up will summarize:
+2. Run it.
+3. A pop-up will summarize:
    - Modified entries count.
    - Affected dates.
    - Failures/skipped dates (if any).
